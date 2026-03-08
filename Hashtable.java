@@ -1,63 +1,99 @@
 import java.util.*;
 
-public class FlashSaleInventoryManager {
+class DNSEntry {
+    String ipAddress;
+    long expiryTime;
 
-    private HashMap<String, Integer> inventory = new HashMap<>();
-
-    private HashMap<String, Queue<Integer>> waitingList = new HashMap<>();
-
-    public FlashSaleInventoryManager() {
-        inventory.put("IPHONE15_256GB", 100);
-        waitingList.put("IPHONE15_256GB", new LinkedList<>());
-    }
-    public synchronized int checkStock(String productId) {
-        return inventory.getOrDefault(productId, 0);
+    DNSEntry(String ipAddress, long ttlSeconds) {
+        this.ipAddress = ipAddress;
+        this.expiryTime = System.currentTimeMillis() + ttlSeconds * 1000;
     }
 
-    public synchronized String purchaseItem(String productId, int userId) {
+    boolean isExpired() {
+        return System.currentTimeMillis() > expiryTime;
+    }
+}
 
-        int stock = inventory.getOrDefault(productId, 0);
+public class DNSCache {
 
-        if (stock > 0) {
-            inventory.put(productId, stock - 1);
-            return "Success, " + (stock - 1) + " units remaining";
+    private final int capacity;
+    private LinkedHashMap<String, DNSEntry> cache;
+
+    private int hits = 0;
+    private int misses = 0;
+
+    public DNSCache(int capacity) {
+        this.capacity = capacity;
+
+        cache = new LinkedHashMap<String, DNSEntry>(capacity, 0.75f, true) {
+            protected boolean removeEldestEntry(Map.Entry<String, DNSEntry> eldest) {
+                return size() > DNSCache.this.capacity;
+            }
+        };
+    }
+
+    // Resolve domain
+    public synchronized String resolve(String domain) {
+
+        DNSEntry entry = cache.get(domain);
+
+        if (entry != null && !entry.isExpired()) {
+            hits++;
+            return "Cache HIT → " + entry.ipAddress;
         }
 
-        Queue<Integer> queue = waitingList.get(productId);
-        queue.add(userId);
+        if (entry != null && entry.isExpired()) {
+            cache.remove(domain);
+        }
 
-        return "Added to waiting list, position #" + queue.size();
+        misses++;
+
+        // simulate upstream DNS lookup
+        String ip = queryUpstreamDNS(domain);
+
+        cache.put(domain, new DNSEntry(ip, 300));
+
+        return "Cache MISS → " + ip;
     }
 
-    public synchronized void restock(String productId, int quantity) {
+    // Simulated upstream DNS query
+    private String queryUpstreamDNS(String domain) {
+        return "172.217." + new Random().nextInt(255) + "." + new Random().nextInt(255);
+    }
 
-        inventory.put(productId,
-                inventory.getOrDefault(productId, 0) + quantity);
+    // Cache statistics
+    public void getCacheStats() {
 
-        Queue<Integer> queue = waitingList.get(productId);
+        int total = hits + misses;
+        double hitRate = total == 0 ? 0 : (hits * 100.0) / total;
 
-        while (inventory.get(productId) > 0 && !queue.isEmpty()) {
+        System.out.println("Cache Hits: " + hits);
+        System.out.println("Cache Misses: " + misses);
+        System.out.println("Hit Rate: " + String.format("%.2f", hitRate) + "%");
+    }
 
-            int user = queue.poll();
-            inventory.put(productId, inventory.get(productId) - 1);
+    // Cleanup expired entries
+    public void cleanupExpired() {
 
-            System.out.println("User " + user + " purchase fulfilled from waiting list.");
+        Iterator<Map.Entry<String, DNSEntry>> iterator = cache.entrySet().iterator();
+
+        while (iterator.hasNext()) {
+            Map.Entry<String, DNSEntry> entry = iterator.next();
+            if (entry.getValue().isExpired()) {
+                iterator.remove();
+            }
         }
     }
 
     public static void main(String[] args) {
 
-        FlashSaleInventoryManager manager = new FlashSaleInventoryManager();
+        DNSCache dns = new DNSCache(5);
 
-        System.out.println("Stock: " + manager.checkStock("IPHONE15_256GB"));
+        System.out.println(dns.resolve("google.com"));
+        System.out.println(dns.resolve("google.com"));
 
-        System.out.println(manager.purchaseItem("IPHONE15_256GB", 12345));
-        System.out.println(manager.purchaseItem("IPHONE15_256GB", 67890));
+        System.out.println(dns.resolve("openai.com"));
 
-        for (int i = 0; i < 100; i++) {
-            manager.purchaseItem("IPHONE15_256GB", i);
-        }
-
-        System.out.println(manager.purchaseItem("IPHONE15_256GB", 99999));
+        dns.getCacheStats();
     }
 }
