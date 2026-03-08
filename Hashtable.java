@@ -1,99 +1,92 @@
 import java.util.*;
 
-class DNSEntry {
-    String ipAddress;
-    long expiryTime;
+public class PlagiarismDetector {
 
-    DNSEntry(String ipAddress, long ttlSeconds) {
-        this.ipAddress = ipAddress;
-        this.expiryTime = System.currentTimeMillis() + ttlSeconds * 1000;
-    }
+    private HashMap<String, Set<String>> index = new HashMap<>();
 
-    boolean isExpired() {
-        return System.currentTimeMillis() > expiryTime;
-    }
-}
+    private int N = 5; 
 
-public class DNSCache {
+    private List<String> extractNGrams(String text) {
 
-    private final int capacity;
-    private LinkedHashMap<String, DNSEntry> cache;
+        String[] words = text.toLowerCase().split("\\s+");
+        List<String> grams = new ArrayList<>();
 
-    private int hits = 0;
-    private int misses = 0;
+        for (int i = 0; i <= words.length - N; i++) {
 
-    public DNSCache(int capacity) {
-        this.capacity = capacity;
+            StringBuilder gram = new StringBuilder();
 
-        cache = new LinkedHashMap<String, DNSEntry>(capacity, 0.75f, true) {
-            protected boolean removeEldestEntry(Map.Entry<String, DNSEntry> eldest) {
-                return size() > DNSCache.this.capacity;
+            for (int j = 0; j < N; j++) {
+                gram.append(words[i + j]).append(" ");
             }
-        };
-    }
 
-    // Resolve domain
-    public synchronized String resolve(String domain) {
-
-        DNSEntry entry = cache.get(domain);
-
-        if (entry != null && !entry.isExpired()) {
-            hits++;
-            return "Cache HIT → " + entry.ipAddress;
+            grams.add(gram.toString().trim());
         }
 
-        if (entry != null && entry.isExpired()) {
-            cache.remove(domain);
+        return grams;
+    }
+
+    public void indexDocument(String docId, String text) {
+
+        List<String> grams = extractNGrams(text);
+
+        for (String gram : grams) {
+
+            index.putIfAbsent(gram, new HashSet<>());
+            index.get(gram).add(docId);
+        }
+    }
+    public void analyzeDocument(String docId, String text) {
+
+        List<String> grams = extractNGrams(text);
+
+        HashMap<String, Integer> similarityCounter = new HashMap<>();
+
+        for (String gram : grams) {
+
+            if (index.containsKey(gram)) {
+
+                for (String existingDoc : index.get(gram)) {
+
+                    similarityCounter.put(
+                        existingDoc,
+                        similarityCounter.getOrDefault(existingDoc, 0) + 1
+                    );
+                }
+            }
         }
 
-        misses++;
+        System.out.println("Extracted " + grams.size() + " n-grams");
 
-        // simulate upstream DNS lookup
-        String ip = queryUpstreamDNS(domain);
+        for (String doc : similarityCounter.keySet()) {
 
-        cache.put(domain, new DNSEntry(ip, 300));
+            int matches = similarityCounter.get(doc);
 
-        return "Cache MISS → " + ip;
-    }
+            double similarity = (matches * 100.0) / grams.size();
 
-    // Simulated upstream DNS query
-    private String queryUpstreamDNS(String domain) {
-        return "172.217." + new Random().nextInt(255) + "." + new Random().nextInt(255);
-    }
-
-    // Cache statistics
-    public void getCacheStats() {
-
-        int total = hits + misses;
-        double hitRate = total == 0 ? 0 : (hits * 100.0) / total;
-
-        System.out.println("Cache Hits: " + hits);
-        System.out.println("Cache Misses: " + misses);
-        System.out.println("Hit Rate: " + String.format("%.2f", hitRate) + "%");
-    }
-
-    // Cleanup expired entries
-    public void cleanupExpired() {
-
-        Iterator<Map.Entry<String, DNSEntry>> iterator = cache.entrySet().iterator();
-
-        while (iterator.hasNext()) {
-            Map.Entry<String, DNSEntry> entry = iterator.next();
-            if (entry.getValue().isExpired()) {
-                iterator.remove();
-            }
+            System.out.println(
+                "Found " + matches + " matching n-grams with " + doc +
+                " → Similarity: " + String.format("%.2f", similarity) + "%"
+            );
         }
     }
 
     public static void main(String[] args) {
 
-        DNSCache dns = new DNSCache(5);
+        PlagiarismDetector detector = new PlagiarismDetector();
 
-        System.out.println(dns.resolve("google.com"));
-        System.out.println(dns.resolve("google.com"));
+        detector.indexDocument(
+            "essay_092.txt",
+            "machine learning models improve prediction accuracy using training data"
+        );
 
-        System.out.println(dns.resolve("openai.com"));
+        detector.indexDocument(
+            "essay_089.txt",
+            "deep learning models improve prediction performance with neural networks"
+        );
 
-        dns.getCacheStats();
+        detector.analyzeDocument(
+            "essay_123.txt",
+            "machine learning models improve prediction accuracy using training datasets"
+        );
     }
 }
