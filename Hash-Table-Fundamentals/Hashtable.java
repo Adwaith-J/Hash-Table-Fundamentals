@@ -1,114 +1,61 @@
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.*;
+import java.util.*;
 
-class TokenBucket {
-    AtomicInteger tokens;
-    long lastRefillTime;
-    final int maxTokens;
-    final double refillRate;
+class TrieNode {
+    Map<Character, TrieNode> children = new HashMap<>();
+    Map<String, Integer> counts = new HashMap<>();
+    boolean end;
+}
 
-    TokenBucket(int maxTokens, double refillRate) {
-        this.tokens = new AtomicInteger(maxTokens);
-        this.lastRefillTime = System.currentTimeMillis();
-        this.maxTokens = maxTokens;
-        this.refillRate = refillRate;
-    }
+class AutocompleteSystem {
+    private final TrieNode root = new TrieNode();
+    private final Map<String, Integer> globalFreq = new HashMap<>();
 
-    synchronized boolean allowRequest() {
-        refill();
-        if (tokens.get() > 0) {
-            tokens.decrementAndGet();
-            return true;
+    public void addQuery(String query, int freq) {
+        globalFreq.put(query, globalFreq.getOrDefault(query, 0) + freq);
+        TrieNode node = root;
+        for (char c : query.toCharArray()) {
+            node.children.putIfAbsent(c, new TrieNode());
+            node = node.children.get(c);
+            node.counts.put(query, globalFreq.get(query));
         }
-        return false;
+        node.end = true;
     }
 
-    synchronized void refill() {
-        long now = System.currentTimeMillis();
-        double tokensToAdd = (now - lastRefillTime) / 1000.0 * refillRate;
-        if (tokensToAdd > 0) {
-            int newTokens = (int) Math.min(maxTokens, tokens.get() + tokensToAdd);
-            tokens.set(newTokens);
-            lastRefillTime = now;
+    public void updateFrequency(String query) {
+        addQuery(query, 1);
+    }
+
+    public List<String> search(String prefix) {
+        TrieNode node = root;
+        for (char c : prefix.toCharArray()) {
+            if (!node.children.containsKey(c)) return new ArrayList<>();
+            node = node.children.get(c);
         }
-    }
 
-    int remaining() {
-        refill();
-        return tokens.get();
-    }
+        PriorityQueue<Map.Entry<String, Integer>> pq =
+                new PriorityQueue<>((a, b) -> a.getValue() - b.getValue());
 
-    long retryAfter() {
-        if (tokens.get() > 0) return 0;
-        double seconds = 1.0 / refillRate;
-        return (long) seconds;
-    }
-}
+        for (Map.Entry<String, Integer> entry : node.counts.entrySet()) {
+            pq.offer(entry);
+            if (pq.size() > 10) pq.poll();
+        }
 
-class RateLimitResult {
-    boolean allowed;
-    int remaining;
-    long retryAfter;
-
-    RateLimitResult(boolean allowed, int remaining, long retryAfter) {
-        this.allowed = allowed;
-        this.remaining = remaining;
-        this.retryAfter = retryAfter;
-    }
-
-    public String toString() {
-        if (allowed)
-            return "Allowed (" + remaining + " requests remaining)";
-        else
-            return "Denied (0 requests remaining, retry after " + retryAfter + "s)";
-    }
-}
-
-class RateLimitStatus {
-    int used;
-    int limit;
-    long reset;
-
-    RateLimitStatus(int used, int limit, long reset) {
-        this.used = used;
-        this.limit = limit;
-        this.reset = reset;
-    }
-
-    public String toString() {
-        return "{used:" + used + ", limit:" + limit + ", reset:" + reset + "}";
-    }
-}
-
-public class DistributedRateLimiter {
-    private final ConcurrentHashMap<String, TokenBucket> buckets = new ConcurrentHashMap<>();
-    private final int maxTokens = 1000;
-    private final double refillRate = 1000.0 / 3600.0;
-
-    private TokenBucket getBucket(String clientId) {
-        return buckets.computeIfAbsent(clientId, k -> new TokenBucket(maxTokens, refillRate));
-    }
-
-    public RateLimitResult checkRateLimit(String clientId) {
-        TokenBucket bucket = getBucket(clientId);
-        boolean allowed = bucket.allowRequest();
-        int remaining = bucket.remaining();
-        long retry = allowed ? 0 : bucket.retryAfter();
-        return new RateLimitResult(allowed, remaining, retry);
-    }
-
-    public RateLimitStatus getRateLimitStatus(String clientId) {
-        TokenBucket bucket = getBucket(clientId);
-        int remaining = bucket.remaining();
-        int used = maxTokens - remaining;
-        long reset = System.currentTimeMillis() / 1000 + (long)((maxTokens - remaining) / refillRate);
-        return new RateLimitStatus(used, maxTokens, reset);
+        List<String> result = new ArrayList<>();
+        while (!pq.isEmpty()) result.add(pq.poll().getKey());
+        Collections.reverse(result);
+        return result;
     }
 
     public static void main(String[] args) {
-        DistributedRateLimiter limiter = new DistributedRateLimiter();
-        System.out.println(limiter.checkRateLimit("abc123"));
-        System.out.println(limiter.checkRateLimit("abc123"));
-        System.out.println(limiter.getRateLimitStatus("abc123"));
+        AutocompleteSystem system = new AutocompleteSystem();
+        system.addQuery("java tutorial", 1234567);
+        system.addQuery("javascript", 987654);
+        system.addQuery("java download", 456789);
+        system.addQuery("java 21 features", 1);
+
+        System.out.println(system.search("jav"));
+
+        system.updateFrequency("java 21 features");
+        system.updateFrequency("java 21 features");
     }
 }
