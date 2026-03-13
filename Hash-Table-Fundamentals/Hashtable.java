@@ -1,150 +1,114 @@
-import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
 
-class PageViewEvent {
-    String url;
-    String userId;
-    String source;
+class TokenBucket {
+    AtomicInteger tokens;
+    long lastRefillTime;
+    final int maxTokens;
+    final double refillRate;
 
-    public PageViewEvent(String url, String userId, String source) {
-        this.url = url;
-        this.userId = userId;
-        this.source = source;
+    TokenBucket(int maxTokens, double refillRate) {
+        this.tokens = new AtomicInteger(maxTokens);
+        this.lastRefillTime = System.currentTimeMillis();
+        this.maxTokens = maxTokens;
+        this.refillRate = refillRate;
+    }
+
+    synchronized boolean allowRequest() {
+        refill();
+        if (tokens.get() > 0) {
+            tokens.decrementAndGet();
+            return true;
+        }
+        return false;
+    }
+
+    synchronized void refill() {
+        long now = System.currentTimeMillis();
+        double tokensToAdd = (now - lastRefillTime) / 1000.0 * refillRate;
+        if (tokensToAdd > 0) {
+            int newTokens = (int) Math.min(maxTokens, tokens.get() + tokensToAdd);
+            tokens.set(newTokens);
+            lastRefillTime = now;
+        }
+    }
+
+    int remaining() {
+        refill();
+        return tokens.get();
+    }
+
+    long retryAfter() {
+        if (tokens.get() > 0) return 0;
+        double seconds = 1.0 / refillRate;
+        return (long) seconds;
     }
 }
 
-class PageStats {
-    String url;
-    int views;
+class RateLimitResult {
+    boolean allowed;
+    int remaining;
+    long retryAfter;
 
-    PageStats(String url, int views) {
-        this.url = url;
-        this.views = views;
+    RateLimitResult(boolean allowed, int remaining, long retryAfter) {
+        this.allowed = allowed;
+        this.remaining = remaining;
+        this.retryAfter = retryAfter;
+    }
+
+    public String toString() {
+        if (allowed)
+            return "Allowed (" + remaining + " requests remaining)";
+        else
+            return "Denied (0 requests remaining, retry after " + retryAfter + "s)";
     }
 }
 
-public class RealTimeAnalytics {
+class RateLimitStatus {
+    int used;
+    int limit;
+    long reset;
 
-    private Map<String, Integer> pageViews = new ConcurrentHashMap<>();
-
-    private Map<String, Set<String>> uniqueVisitors = new ConcurrentHashMap<>();
-
-    private Map<String, Integer> sourceCounts = new ConcurrentHashMap<>();
-
-    public void processEvent(PageViewEvent event) {
-
-        pageViews.put(event.url, pageViews.getOrDefault(event.url, 0) + 1);
-
-        uniqueVisitors.putIfAbsent(event.url, ConcurrentHashMap.newKeySet());
-        uniqueVisitors.get(event.url).add(event.userId);
-
-        sourceCounts.put(event.source,
-                sourceCounts.getOrDefault(event.source, 0) + 1);
+    RateLimitStatus(int used, int limit, long reset) {
+        this.used = used;
+        this.limit = limit;
+        this.reset = reset;
     }
 
+    public String toString() {
+        return "{used:" + used + ", limit:" + limit + ", reset:" + reset + "}";
+    }
+}
 
-    public List<PageStats> getTopPages() {
+public class DistributedRateLimiter {
+    private final ConcurrentHashMap<String, TokenBucket> buckets = new ConcurrentHashMap<>();
+    private final int maxTokens = 1000;
+    private final double refillRate = 1000.0 / 3600.0;
 
-        PriorityQueue<PageStats> minHeap =
-                new PriorityQueue<>(Comparator.comparingInt(p -> p.views));
-
-        for (String url : pageViews.keySet()) {
-
-            PageStats stats = new PageStats(url, pageViews.get(url));
-
-            minHeap.offer(stats);
-
-            if (minHeap.size() > 10) {
-                minHeap.poll();
-            }
-        }
-
-        List<PageStats> result = new ArrayList<>();
-
-        while (!minHeap.isEmpty()) {
-            result.add(minHeap.poll());
-        }
-
-        Collections.reverse(result);
-        return result;
+    private TokenBucket getBucket(String clientId) {
+        return buckets.computeIfAbsent(clientId, k -> new TokenBucket(maxTokens, refillRate));
     }
 
-
-    public void getDashboard() {
-
-        System.out.println("===== REAL TIME DASHBOARD =====");
-
-        System.out.println("\nTop Pages:");
-
-        List<PageStats> topPages = getTopPages();
-
-        int rank = 1;
-        for (PageStats p : topPages) {
-
-            int unique = uniqueVisitors.get(p.url).size();
-
-            System.out.println(rank++ + ". "
-                    + p.url + " - "
-                    + p.views + " views ("
-                    + unique + " unique)");
-        }
-
-        System.out.println("\nTraffic Sources:");
-
-        int total = sourceCounts.values().stream().mapToInt(i -> i).sum();
-
-        for (String source : sourceCounts.keySet()) {
-
-            int count = sourceCounts.get(source);
-
-            double percent = (count * 100.0) / total;
-
-            System.out.printf("%s: %.2f%%\n", source, percent);
-        }
-
-        System.out.println("===============================\n");
+    public RateLimitResult checkRateLimit(String clientId) {
+        TokenBucket bucket = getBucket(clientId);
+        boolean allowed = bucket.allowRequest();
+        int remaining = bucket.remaining();
+        long retry = allowed ? 0 : bucket.retryAfter();
+        return new RateLimitResult(allowed, remaining, retry);
     }
 
+    public RateLimitStatus getRateLimitStatus(String clientId) {
+        TokenBucket bucket = getBucket(clientId);
+        int remaining = bucket.remaining();
+        int used = maxTokens - remaining;
+        long reset = System.currentTimeMillis() / 1000 + (long)((maxTokens - remaining) / refillRate);
+        return new RateLimitStatus(used, maxTokens, reset);
+    }
 
     public static void main(String[] args) {
-
-        RealTimeAnalytics analytics = new RealTimeAnalytics();
-
-        ScheduledExecutorService scheduler =
-                Executors.newScheduledThreadPool(1);
-
-        scheduler.scheduleAtFixedRate(
-                analytics::getDashboard,
-                5,
-                5,
-                TimeUnit.SECONDS
-        );
-
-        Random rand = new Random();
-
-        String[] urls = {
-                "/article/breaking-news",
-                "/sports/championship",
-                "/tech/ai-future",
-                "/world/politics"
-        };
-
-        String[] sources = {
-                "google",
-                "facebook",
-                "direct",
-                "twitter"
-        };
-
-        while (true) {
-
-            PageViewEvent event = new PageViewEvent(
-                    urls[rand.nextInt(urls.length)],
-                    "user_" + rand.nextInt(10000),
-                    sources[rand.nextInt(sources.length)]
-            );
-
-            analytics.processEvent(event);
-        }
+        DistributedRateLimiter limiter = new DistributedRateLimiter();
+        System.out.println(limiter.checkRateLimit("abc123"));
+        System.out.println(limiter.checkRateLimit("abc123"));
+        System.out.println(limiter.getRateLimitStatus("abc123"));
     }
 }
